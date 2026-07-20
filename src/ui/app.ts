@@ -181,7 +181,12 @@ function simulateOtherFixtures(round: number) {
 
 // ---------- Match screen ----------
 
-let playbackTimer: number | undefined;
+const MS_PER_SIMULATED_MINUTE = 130;
+let activeAnimationHandle: number | undefined;
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
 
 function startMatch(fixture: Fixture) {
   if (!state) return;
@@ -219,9 +224,16 @@ function startMatch(fixture: Fixture) {
   controls.appendChild(skipBtn);
   root.appendChild(controls);
 
-  let frameIndex = 0;
   let homeScore = 0;
   let awayScore = 0;
+  let eventCursor = 0;
+
+  // A synthetic kickoff frame (ball centered, minute 0) so the first minute
+  // of play also has a start point to interpolate from.
+  const timeline: MatchFrame[] = [
+    { minute: 0, ballX: 0.5, ballY: 0.5, possession: null, phase: 'mid' },
+    ...frames,
+  ];
 
   const logLine = (text: string) => {
     const p = el('p', undefined, text);
@@ -229,14 +241,10 @@ function startMatch(fixture: Fixture) {
     commentary.scrollTop = commentary.scrollHeight;
   };
 
-  const applyFrame = (frame: MatchFrame) => {
-    drawFrame(ctx, frame, home, away);
-    minuteLabel.textContent = `${frame.minute}'`;
-
-    for (const event of result.events) {
-      if (event.minute !== frame.minute) continue;
-      if ((event as { _shown?: boolean })._shown) continue;
-      (event as { _shown?: boolean })._shown = true;
+  const processEventsUpTo = (minute: number) => {
+    while (eventCursor < result.events.length && result.events[eventCursor].minute <= minute) {
+      const event = result.events[eventCursor];
+      eventCursor++;
       logLine(event.text);
       if (event.kind === 'goal') {
         if (event.side === 'home') homeScore++;
@@ -246,16 +254,40 @@ function startMatch(fixture: Fixture) {
     }
   };
 
-  const finish = () => {
-    if (playbackTimer) window.clearInterval(playbackTimer);
-    playbackTimer = undefined;
+  // Renders a smooth in-between position for any point in match time by
+  // interpolating the ball between the two bracketing per-minute frames.
+  // Player positions follow automatically since they're a function of the
+  // ball position (see engine/positioning.ts).
+  const renderAt = (minuteFloat: number) => {
+    const clamped = Math.min(90, Math.max(0, minuteFloat));
+    const k = Math.min(timeline.length - 2, Math.floor(clamped));
+    const t = clamped - k;
+    const from = timeline[k];
+    const to = timeline[k + 1];
+    const minuteFloor = Math.floor(clamped);
+
+    drawFrame(
+      ctx,
+      {
+        minute: minuteFloor,
+        ballX: lerp(from.ballX, to.ballX, t),
+        ballY: lerp(from.ballY, to.ballY, t),
+        possession: to.possession,
+        phase: to.phase,
+      },
+      home,
+      away,
+    );
+    minuteLabel.textContent = `${minuteFloor}'`;
+    processEventsUpTo(minuteFloor);
+  };
+
+  const finishPlayback = () => {
+    if (activeAnimationHandle) cancelAnimationFrame(activeAnimationHandle);
+    activeAnimationHandle = undefined;
+    renderAt(90);
+    processEventsUpTo(90);
     scoreLabel.textContent = `${result.homeScore} - ${result.awayScore}`;
-    for (const event of result.events) {
-      if ((event as { _shown?: boolean })._shown) continue;
-      (event as { _shown?: boolean })._shown = true;
-      logLine(event.text);
-    }
-    minuteLabel.textContent = "90'";
     skipBtn.disabled = true;
     const doneBtn = el('button', undefined, '結果へ');
     doneBtn.onclick = () => {
@@ -266,21 +298,23 @@ function startMatch(fixture: Fixture) {
     controls.appendChild(doneBtn);
   };
 
-  playbackTimer = window.setInterval(() => {
-    if (frameIndex >= frames.length) {
-      finish();
+  let startTimestamp: number | undefined;
+  const tick = (now: number) => {
+    if (startTimestamp === undefined) startTimestamp = now;
+    const elapsedMinutes = (now - startTimestamp) / MS_PER_SIMULATED_MINUTE;
+    if (elapsedMinutes >= 90) {
+      finishPlayback();
       return;
     }
-    applyFrame(frames[frameIndex]);
-    frameIndex++;
-  }, 90);
+    renderAt(elapsedMinutes);
+    activeAnimationHandle = requestAnimationFrame(tick);
+  };
+
+  if (activeAnimationHandle) cancelAnimationFrame(activeAnimationHandle);
+  activeAnimationHandle = requestAnimationFrame(tick);
 
   skipBtn.onclick = () => {
-    while (frameIndex < frames.length) {
-      applyFrame(frames[frameIndex]);
-      frameIndex++;
-    }
-    finish();
+    finishPlayback();
   };
 }
 
