@@ -1,5 +1,6 @@
 import type { MatchFrame } from '../engine/match';
-import type { Team } from '../types';
+import { predictOffset } from '../engine/positioning';
+import type { Position, Team } from '../types';
 
 export const PITCH_W = 200;
 export const PITCH_H = 120;
@@ -10,32 +11,49 @@ interface Dot {
   isGK: boolean;
 }
 
-const DF_Y = [0.18, 0.38, 0.62, 0.82];
-const MF_Y = [0.18, 0.38, 0.62, 0.82];
-const FW_Y = [0.38, 0.62];
+// Lateral spread of teammates around the role's learned center position.
+const DF_LANES = [-0.32, -0.12, 0.12, 0.32];
+const MF_LANES = [-0.32, -0.12, 0.12, 0.32];
+const FW_LANES = [-0.12, 0.12];
 
-function baseFormation(): Dot[] {
-  return [
-    { x: 0.05, y: 0.5, isGK: true },
-    ...DF_Y.map((y) => ({ x: 0.2, y, isGK: false })),
-    ...MF_Y.map((y) => ({ x: 0.42, y, isGK: false })),
-    ...FW_Y.map((y) => ({ x: 0.6, y, isGK: false })),
-  ];
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v));
 }
 
-function formationFor(side: 'home' | 'away', frame: MatchFrame): Dot[] {
-  const dots = baseFormation();
-  let shift = 0;
-  if (frame.possession === side) {
-    shift = frame.phase === 'mid' ? 0.04 : frame.phase === 'attack' ? 0.14 : 0.22;
-  } else if (frame.possession) {
-    shift = -0.04;
-  }
+function laneDots(position: Position, lanes: number[], ballXRel: number, ballYRel: number): Dot[] {
+  const { dx, dy } = predictOffset(position, ballXRel, ballYRel);
+  const centerX = clamp01(ballXRel + dx);
+  const centerY = clamp01(ballYRel + dy);
+  return lanes.map((lane) => ({ x: centerX, y: clamp01(centerY + lane), isGK: false }));
+}
 
-  return dots.map((d) => {
-    const x = side === 'home' ? d.x + shift : 1 - (d.x + shift);
-    return { x, y: d.y, isGK: d.isGK };
-  });
+// Player positions are predicted from the ball position via a model learned
+// (linear regression) from relative-position data per role — see
+// engine/positioning.ts and data/positioningSamples.ts.
+function formationFor(side: 'home' | 'away', frame: MatchFrame): Dot[] {
+  // Work in a reference frame where this side's own goal sits at x=0.
+  const ballXRel = side === 'home' ? frame.ballX : 1 - frame.ballX;
+  const ballYRel = frame.ballY;
+
+  const gkOffset = predictOffset('GK', ballXRel, ballYRel);
+  const gk: Dot = {
+    x: clamp01(ballXRel + gkOffset.dx),
+    y: clamp01(ballYRel + gkOffset.dy),
+    isGK: true,
+  };
+
+  const dots = [
+    gk,
+    ...laneDots('DF', DF_LANES, ballXRel, ballYRel),
+    ...laneDots('MF', MF_LANES, ballXRel, ballYRel),
+    ...laneDots('FW', FW_LANES, ballXRel, ballYRel),
+  ];
+
+  return dots.map((d) => ({
+    x: side === 'home' ? d.x : 1 - d.x,
+    y: d.y,
+    isGK: d.isGK,
+  }));
 }
 
 function drawStripes(ctx: CanvasRenderingContext2D) {
