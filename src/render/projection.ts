@@ -5,13 +5,13 @@
 // (z) lifts the sprite up the screen relative to its ground position.
 
 export const VIEW_W = 240;
-export const VIEW_H = 170;
+export const VIEW_H = 130;
 
-const HORIZON_Y = 20;
-const NEAR_Y = 152;
+const HORIZON_Y = 14;
+const NEAR_Y = 118;
 const SIDE_MARGIN = 14;
-const FAR_WIDTH_RATIO = 0.5;
-const HEIGHT_PX_PER_UNIT = 34;
+const FAR_WIDTH_RATIO = 0.58;
+const HEIGHT_PX_PER_UNIT = 30;
 
 export interface Projected {
   sx: number;
