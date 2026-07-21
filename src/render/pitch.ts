@@ -126,3 +126,32 @@ export function drawFrame(
     ctx.fillRect(0, 0, PITCH_W, PITCH_H);
   }
 }
+
+// Draws a frame of literal recorded positions (no positioning model involved) —
+// used by the real-data replay screen. home/away are plain [x, y] coordinate
+// pairs already in 0..1 pitch space.
+export function drawReplayFrame(
+  ctx: CanvasRenderingContext2D,
+  ball: readonly [number, number],
+  home: readonly (readonly [number, number])[],
+  away: readonly (readonly [number, number])[],
+) {
+  ctx.clearRect(0, 0, PITCH_W, PITCH_H);
+  drawPitchBackground(ctx);
+
+  const drawDots = (players: readonly (readonly [number, number])[], color: string) => {
+    ctx.fillStyle = color;
+    for (const [x, y] of players) {
+      ctx.fillRect(Math.round(x * PITCH_W) - 2, Math.round(y * PITCH_H) - 2, 4, 4);
+    }
+  };
+
+  drawDots(away, '#1d4ed8');
+  drawDots(home, '#e63946');
+
+  const [bx, by] = ball;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(Math.round(bx * PITCH_W) - 1, Math.round(by * PITCH_H) - 1, 3, 3);
+  ctx.fillStyle = '#1d1d1d';
+  ctx.fillRect(Math.round(bx * PITCH_W), Math.round(by * PITCH_H), 1, 1);
+}

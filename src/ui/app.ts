@@ -3,7 +3,8 @@ import { generateSchedule, computeStandings } from '../engine/league';
 import { simulateMatch, type MatchFrame } from '../engine/match';
 import { teamOverallRating } from '../engine/ratings';
 import type { Fixture, StandingRow, Team } from '../types';
-import { drawFrame, PITCH_H, PITCH_W } from '../render/pitch';
+import { drawFrame, drawReplayFrame, PITCH_H, PITCH_W } from '../render/pitch';
+import { REPLAY_FPS, REPLAY_FRAMES } from '../data/replaySample';
 
 interface GameState {
   fixtures: Fixture[];
@@ -41,7 +42,87 @@ function renderTitle() {
   const startBtn = el('button', undefined, 'はじめる');
   startBtn.onclick = () => renderTeamSelect();
   wrap.appendChild(startBtn);
+
+  const replayBtn = el('button', 'secondary', '実データ再生モード');
+  replayBtn.style.marginLeft = '10px';
+  replayBtn.onclick = () => renderReplay();
+  wrap.appendChild(replayBtn);
+
   root.appendChild(wrap);
+}
+
+// ---------- Real-data replay mode ----------
+
+let replayAnimationHandle: number | undefined;
+
+function renderReplay() {
+  if (replayAnimationHandle) cancelAnimationFrame(replayAnimationHandle);
+  root.innerHTML = '';
+
+  root.appendChild(el('h2', undefined, '実データ再生モード'));
+  root.appendChild(
+    el(
+      'p',
+      undefined,
+      'Metrica Sports の公開サンプルトラッキングデータ（匿名化済み実試合、前半5分間）をモデルを介さずそのまま再生します。',
+    ),
+  );
+
+  const scoreboard = el('div', 'scoreboard');
+  const homeLabel = el('span', undefined, 'チームA(赤)');
+  const timeLabel = el('span', undefined, '0:00');
+  const awayLabel = el('span', undefined, 'チームB(青)');
+  scoreboard.append(homeLabel, timeLabel, awayLabel);
+  root.appendChild(scoreboard);
+
+  const canvas = document.createElement('canvas');
+  canvas.id = 'pitch';
+  canvas.width = PITCH_W;
+  canvas.height = PITCH_H;
+  root.appendChild(canvas);
+  const ctx = canvas.getContext('2d')!;
+
+  const controls = el('div', 'controls');
+  const backBtn = el('button', 'secondary', 'タイトルへ戻る');
+  backBtn.onclick = () => {
+    if (replayAnimationHandle) cancelAnimationFrame(replayAnimationHandle);
+    renderTitle();
+  };
+  controls.appendChild(backBtn);
+  root.appendChild(controls);
+
+  const frameDurationMs = 1000 / REPLAY_FPS;
+  const totalFrames = REPLAY_FRAMES.length;
+  let startTimestamp: number | undefined;
+
+  const tick = (now: number) => {
+    if (startTimestamp === undefined) startTimestamp = now;
+    const elapsedFrames = ((now - startTimestamp) / frameDurationMs) % totalFrames;
+    const k = Math.floor(elapsedFrames);
+    const t = elapsedFrames - k;
+    const kNext = (k + 1) % totalFrames;
+
+    const from = REPLAY_FRAMES[k];
+    const to = REPLAY_FRAMES[kNext];
+    const lerpPair = (a: [number, number], b: [number, number]): [number, number] => [
+      lerp(a[0], b[0], t),
+      lerp(a[1], b[1], t),
+    ];
+
+    drawReplayFrame(
+      ctx,
+      lerpPair(from.ball, to.ball),
+      from.home.map((p, i) => lerpPair(p, to.home[i] ?? p)),
+      from.away.map((p, i) => lerpPair(p, to.away[i] ?? p)),
+    );
+
+    const seconds = Math.floor(k / REPLAY_FPS);
+    timeLabel.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+
+    replayAnimationHandle = requestAnimationFrame(tick);
+  };
+
+  replayAnimationHandle = requestAnimationFrame(tick);
 }
 
 // ---------- Team select ----------
