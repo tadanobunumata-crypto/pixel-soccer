@@ -1,9 +1,10 @@
-import type { MatchFrame } from '../engine/match';
 import { predictOffset } from '../engine/positioning';
+import type { Side } from '../engine/match';
 import type { Position, Team } from '../types';
+import { project, projectPoint, VIEW_H, VIEW_W } from './projection';
+import { drawBall, drawBallShadow, drawPerson } from './sprite';
 
-export const PITCH_W = 200;
-export const PITCH_H = 120;
+export { VIEW_W as PITCH_W, VIEW_H as PITCH_H } from './projection';
 
 interface Dot {
   x: number;
@@ -30,10 +31,10 @@ function laneDots(position: Position, lanes: number[], ballXRel: number, ballYRe
 // Player positions are predicted from the ball position via a model learned
 // (linear regression) from relative-position data per role — see
 // engine/positioning.ts and data/positioningSamples.ts.
-function formationFor(side: 'home' | 'away', frame: MatchFrame): Dot[] {
+function formationFor(side: Side, ballX: number, ballY: number): Dot[] {
   // Work in a reference frame where this side's own goal sits at x=0.
-  const ballXRel = side === 'home' ? frame.ballX : 1 - frame.ballX;
-  const ballYRel = frame.ballY;
+  const ballXRel = side === 'home' ? ballX : 1 - ballX;
+  const ballYRel = ballY;
 
   const gkOffset = predictOffset('GK', ballXRel, ballYRel);
   const gk: Dot = {
@@ -56,102 +57,209 @@ function formationFor(side: 'home' | 'away', frame: MatchFrame): Dot[] {
   }));
 }
 
-function drawStripes(ctx: CanvasRenderingContext2D) {
-  const stripeW = PITCH_W / 10;
-  for (let i = 0; i < 10; i++) {
-    ctx.fillStyle = i % 2 === 0 ? '#2d8a3e' : '#279236';
-    ctx.fillRect(i * stripeW, 0, stripeW, PITCH_H);
-  }
-}
+function drawPitchBackground(ctx: CanvasRenderingContext2D) {
+  ctx.fillStyle = '#0b2412';
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
-function drawLines(ctx: CanvasRenderingContext2D) {
+  const stripes = 10;
+  for (let i = 0; i < stripes; i++) {
+    const x0 = i / stripes;
+    const x1 = (i + 1) / stripes;
+    const p0 = projectPoint(x0, 0);
+    const p1 = projectPoint(x1, 0);
+    const p2 = projectPoint(x1, 1);
+    const p3 = projectPoint(x0, 1);
+    ctx.fillStyle = i % 2 === 0 ? '#2d8a3e' : '#279236';
+    ctx.beginPath();
+    ctx.moveTo(p0[0], p0[1]);
+    ctx.lineTo(p1[0], p1[1]);
+    ctx.lineTo(p2[0], p2[1]);
+    ctx.lineTo(p3[0], p3[1]);
+    ctx.closePath();
+    ctx.fill();
+  }
+
   ctx.strokeStyle = '#f1faee';
   ctx.lineWidth = 1;
 
-  ctx.strokeRect(4, 4, PITCH_W - 8, PITCH_H - 8);
-
+  const corners = [
+    [0, 0],
+    [1, 0],
+    [1, 1],
+    [0, 1],
+  ].map(([x, y]) => projectPoint(x, y));
   ctx.beginPath();
-  ctx.moveTo(PITCH_W / 2, 4);
-  ctx.lineTo(PITCH_W / 2, PITCH_H - 4);
+  corners.forEach(([sx, sy], i) => (i === 0 ? ctx.moveTo(sx, sy) : ctx.lineTo(sx, sy)));
+  ctx.closePath();
   ctx.stroke();
 
+  const [hx0, hy0] = projectPoint(0.5, 0);
+  const [hx1, hy1] = projectPoint(0.5, 1);
   ctx.beginPath();
-  ctx.arc(PITCH_W / 2, PITCH_H / 2, 14, 0, Math.PI * 2);
+  ctx.moveTo(hx0, hy0);
+  ctx.lineTo(hx1, hy1);
   ctx.stroke();
 
-  // penalty boxes
-  ctx.strokeRect(4, PITCH_H / 2 - 22, 22, 44);
-  ctx.strokeRect(PITCH_W - 26, PITCH_H / 2 - 22, 22, 44);
+  const centerProj = project(0.5, 0.5);
+  const rx = 22 * centerProj.scale;
+  const ry = rx * 0.5;
+  ctx.beginPath();
+  ctx.ellipse(centerProj.sx, centerProj.sy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.stroke();
 
-  // goal mouths
-  ctx.strokeRect(0, PITCH_H / 2 - 8, 4, 16);
-  ctx.strokeRect(PITCH_W - 4, PITCH_H / 2 - 8, 4, 16);
+  const drawBox = (xEdge: number, dir: 1 | -1) => {
+    const depth = 0.16 * dir;
+    const pts = [
+      [xEdge, 0.26],
+      [xEdge + depth, 0.26],
+      [xEdge + depth, 0.74],
+      [xEdge, 0.74],
+    ].map(([x, y]) => projectPoint(x, y));
+    ctx.beginPath();
+    pts.forEach(([sx, sy], i) => (i === 0 ? ctx.moveTo(sx, sy) : ctx.lineTo(sx, sy)));
+    ctx.closePath();
+    ctx.stroke();
+  };
+  drawBox(0, 1);
+  drawBox(1, -1);
+
+  const drawGoal = (xEdge: number) => {
+    const top = projectPoint(xEdge, 0.46);
+    const bottom = projectPoint(xEdge, 0.54);
+    ctx.beginPath();
+    ctx.moveTo(top[0], top[1] - 7);
+    ctx.lineTo(top[0], top[1]);
+    ctx.lineTo(bottom[0], bottom[1]);
+    ctx.lineTo(bottom[0], bottom[1] - 7);
+    ctx.stroke();
+  };
+  drawGoal(0);
+  drawGoal(1);
 }
 
-export function drawPitchBackground(ctx: CanvasRenderingContext2D) {
-  drawStripes(ctx);
-  drawLines(ctx);
+export interface RenderState {
+  ballX: number;
+  ballY: number;
+  ballZ: number;
+  side: Side;
+  kicking: boolean;
+  goalFlash: boolean;
+}
+
+interface Drawable {
+  depth: number;
+  draw: () => void;
 }
 
 export function drawFrame(
   ctx: CanvasRenderingContext2D,
-  frame: MatchFrame,
+  state: RenderState,
   home: Team,
   away: Team,
+  animT: number,
 ) {
-  ctx.clearRect(0, 0, PITCH_W, PITCH_H);
+  ctx.clearRect(0, 0, VIEW_W, VIEW_H);
   drawPitchBackground(ctx);
 
-  const drawDots = (dots: Dot[], color: string) => {
+  const homeDots = formationFor('home', state.ballX, state.ballY);
+  const awayDots = formationFor('away', state.ballX, state.ballY);
+
+  const carrierSide = state.side;
+  const carrierPool = carrierSide === 'home' ? homeDots : carrierSide === 'away' ? awayDots : [];
+  let carrier: Dot | undefined;
+  let bestDist = Infinity;
+  for (const d of carrierPool) {
+    const dist = Math.hypot(d.x - state.ballX, d.y - state.ballY);
+    if (dist < bestDist) {
+      bestDist = dist;
+      carrier = d;
+    }
+  }
+
+  const drawables: Drawable[] = [];
+
+  const addTeam = (dots: Dot[], color: string, facing: 1 | -1) => {
     for (const d of dots) {
-      const px = d.x * PITCH_W;
-      const py = d.y * PITCH_H;
-      ctx.fillStyle = d.isGK ? '#ffe066' : color;
-      ctx.fillRect(Math.round(px) - 2, Math.round(py) - 2, 4, 4);
+      const isCarrier = d === carrier;
+      drawables.push({
+        depth: d.y,
+        draw: () => {
+          const p = project(d.x, d.y, 0);
+          drawPerson(
+            ctx,
+            p.sx,
+            p.groundSy,
+            p.scale,
+            d.isGK ? '#ffe066' : color,
+            facing,
+            animT,
+            isCarrier && state.kicking,
+          );
+        },
+      });
     }
   };
 
-  drawDots(formationFor('away', frame), away.color);
-  drawDots(formationFor('home', frame), home.color);
+  addTeam(homeDots, home.color, 1);
+  addTeam(awayDots, away.color, -1);
 
-  const bx = frame.ballX * PITCH_W;
-  const by = frame.ballY * PITCH_H;
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(Math.round(bx) - 1, Math.round(by) - 1, 3, 3);
-  ctx.fillStyle = '#1d1d1d';
-  ctx.fillRect(Math.round(bx), Math.round(by), 1, 1);
+  drawables.push({
+    depth: state.ballY,
+    draw: () => {
+      const ground = project(state.ballX, state.ballY, 0);
+      const lifted = project(state.ballX, state.ballY, state.ballZ);
+      drawBallShadow(ctx, ground.sx, ground.groundSy, ground.scale);
+      drawBall(ctx, lifted.sx, lifted.sy, lifted.scale);
+    },
+  });
 
-  if (frame.phase === 'goal') {
-    ctx.fillStyle = 'rgba(255, 214, 10, 0.35)';
-    ctx.fillRect(0, 0, PITCH_W, PITCH_H);
+  drawables.sort((a, b) => a.depth - b.depth);
+  for (const item of drawables) item.draw();
+
+  if (state.goalFlash) {
+    ctx.fillStyle = 'rgba(255, 214, 10, 0.3)';
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
   }
 }
 
-// Draws a frame of literal recorded positions (no positioning model involved) —
-// used by the real-data replay screen. home/away are plain [x, y] coordinate
-// pairs already in 0..1 pitch space.
+// Draws literal recorded positions (no positioning model involved) — used by
+// the real-data replay screen. home/away are plain [x, y] coordinate pairs
+// already in 0..1 pitch space.
 export function drawReplayFrame(
   ctx: CanvasRenderingContext2D,
   ball: readonly [number, number],
   home: readonly (readonly [number, number])[],
   away: readonly (readonly [number, number])[],
+  animT: number,
 ) {
-  ctx.clearRect(0, 0, PITCH_W, PITCH_H);
+  ctx.clearRect(0, 0, VIEW_W, VIEW_H);
   drawPitchBackground(ctx);
 
-  const drawDots = (players: readonly (readonly [number, number])[], color: string) => {
-    ctx.fillStyle = color;
+  const drawables: Drawable[] = [];
+  const addTeam = (players: readonly (readonly [number, number])[], color: string, facing: 1 | -1) => {
     for (const [x, y] of players) {
-      ctx.fillRect(Math.round(x * PITCH_W) - 2, Math.round(y * PITCH_H) - 2, 4, 4);
+      drawables.push({
+        depth: y,
+        draw: () => {
+          const p = project(x, y, 0);
+          drawPerson(ctx, p.sx, p.groundSy, p.scale, color, facing, animT, false);
+        },
+      });
     }
   };
-
-  drawDots(away, '#1d4ed8');
-  drawDots(home, '#e63946');
+  addTeam(home, '#e63946', 1);
+  addTeam(away, '#1d4ed8', -1);
 
   const [bx, by] = ball;
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(Math.round(bx * PITCH_W) - 1, Math.round(by * PITCH_H) - 1, 3, 3);
-  ctx.fillStyle = '#1d1d1d';
-  ctx.fillRect(Math.round(bx * PITCH_W), Math.round(by * PITCH_H), 1, 1);
+  drawables.push({
+    depth: by,
+    draw: () => {
+      const p = project(bx, by, 0);
+      drawBallShadow(ctx, p.sx, p.groundSy, p.scale);
+      drawBall(ctx, p.sx, p.sy, p.scale);
+    },
+  });
+
+  drawables.sort((a, b) => a.depth - b.depth);
+  for (const item of drawables) item.draw();
 }

@@ -3,18 +3,27 @@ import { mulberry32 } from './rng';
 import { goalkeeperRating, teamAttackRating, teamDefenseRating } from './ratings';
 
 export type Side = 'home' | 'away';
+export type ActionKind = 'dribble' | 'pass' | 'shot';
+export type ShotOutcome = 'goal' | 'save' | 'miss' | 'block';
 
-export interface MatchFrame {
+// One ball-movement segment: from -> to over the segment's playback duration,
+// arcing up to peakHeight and back down (0 = stays on the ground, as in a
+// dribble or a short grounded pass).
+export interface MicroEvent {
   minute: number;
-  ballX: number; // 0..1 across the pitch length
-  ballY: number; // 0..1 across the pitch width
-  possession: Side | null;
-  phase: 'mid' | 'attack' | 'shot' | 'goal';
+  kind: ActionKind;
+  side: Side;
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  peakHeight: number;
+  outcome?: ShotOutcome;
 }
 
 export interface SimulatedMatch {
   result: MatchResult;
-  frames: MatchFrame[];
+  timeline: MicroEvent[];
 }
 
 function clamp01(v: number): number {
@@ -41,9 +50,17 @@ export function simulateMatch(home: Team, away: Team, seed: number): SimulatedMa
   const events: MatchEvent[] = [
     { minute: 0, kind: 'kickoff', text: `キックオフ！ ${home.name} vs ${away.name}` },
   ];
-  const frames: MatchFrame[] = [];
+  const timeline: MicroEvent[] = [];
 
   let lastPossession: Side = rng() > 0.5 ? 'home' : 'away';
+  let prevX = 0.5;
+  let prevY = 0.5;
+
+  const moveTo = (minute: number, kind: ActionKind, side: Side, toX: number, toY: number, peakHeight: number) => {
+    timeline.push({ minute, kind, side, fromX: prevX, fromY: prevY, toX, toY, peakHeight });
+    prevX = toX;
+    prevY = toY;
+  };
 
   for (let minute = 1; minute <= 90; minute++) {
     // possession has inertia: usually keeps flowing to the same side as last minute
@@ -60,6 +77,11 @@ export function simulateMatch(home: Team, away: Team, seed: number): SimulatedMa
     const attackChance = clamp01(0.16 + (attackRating - defenseRating) / 300);
 
     if (rng() < attackChance) {
+      const buildKind: ActionKind = rng() < 0.5 ? 'dribble' : 'pass';
+      const buildX = possession === 'home' ? 0.7 : 0.3;
+      const buildY = clamp01(0.5 + (rng() - 0.5) * 0.6);
+      moveTo(minute, buildKind, possession, buildX, buildY, buildKind === 'pass' ? 0.08 + rng() * 0.06 : 0);
+
       const scorer = pickAttacker(attackTeam, rng);
       const shotChance = clamp01(0.4 + (scorer.technique - 50) / 250);
 
@@ -68,7 +90,16 @@ export function simulateMatch(home: Team, away: Team, seed: number): SimulatedMa
         const savePower = gkRating + (rng() - 0.5) * 30;
         const blockPower = defenseRating + (rng() - 0.5) * 25;
 
+        let outcome: ShotOutcome;
+        let toX: number;
+        let toY: number;
+        let peakHeight: number;
+
         if (shotPower > savePower && shotPower > blockPower) {
+          outcome = 'goal';
+          toX = possession === 'home' ? 0.98 : 0.02;
+          toY = clamp01(0.5 + (rng() - 0.5) * 0.16);
+          peakHeight = 0.06 + rng() * 0.08;
           if (possession === 'home') homeScore++;
           else awayScore++;
           events.push({
@@ -77,24 +108,33 @@ export function simulateMatch(home: Team, away: Team, seed: number): SimulatedMa
             side: possession,
             text: `⚽ ゴール！ ${attackTeam.shortName} の ${scorer.name} が決めた！ (${homeScore}-${awayScore})`,
           });
-          frames.push({ minute, ballX: possession === 'home' ? 0.92 : 0.08, ballY: 0.5, possession, phase: 'goal' });
         } else if (shotPower > blockPower) {
+          outcome = 'save';
+          toX = possession === 'home' ? 0.88 : 0.12;
+          toY = clamp01(0.5 + (rng() - 0.5) * 0.2);
+          peakHeight = 0.1 + rng() * 0.1;
           events.push({
             minute,
             kind: 'save',
             side: possession,
             text: `${scorer.name} のシュート、相手GKのファインセーブ！`,
           });
-          frames.push({ minute, ballX: possession === 'home' ? 0.85 : 0.15, ballY: 0.5, possession, phase: 'shot' });
         } else {
+          outcome = rng() < 0.5 ? 'block' : 'miss';
+          toX = possession === 'home' ? 0.85 : 0.15;
+          toY = clamp01(0.5 + (rng() < 0.5 ? -1 : 1) * (0.22 + rng() * 0.18));
+          peakHeight = 0.15 + rng() * 0.2;
           events.push({
             minute,
-            kind: rng() < 0.5 ? 'block' : 'miss',
+            kind: outcome,
             side: possession,
             text: `${scorer.name} のシュートは枠を外れた`,
           });
-          frames.push({ minute, ballX: possession === 'home' ? 0.8 : 0.2, ballY: 0.5, possession, phase: 'shot' });
         }
+
+        timeline.push({ minute, kind: 'shot', side: possession, fromX: prevX, fromY: prevY, toX, toY, peakHeight, outcome });
+        prevX = 0.5;
+        prevY = 0.5;
       } else {
         events.push({
           minute,
@@ -102,22 +142,24 @@ export function simulateMatch(home: Team, away: Team, seed: number): SimulatedMa
           side: possession,
           text: `${attackTeam.shortName} が攻め込むが、最後は相手に阻まれる`,
         });
-        frames.push({
+        moveTo(
           minute,
-          ballX: possession === 'home' ? 0.7 : 0.3,
-          ballY: clamp01(0.5 + (rng() - 0.5) * 0.6),
-          possession,
-          phase: 'attack',
-        });
+          rng() < 0.5 ? 'dribble' : 'pass',
+          possession === 'home' ? 'away' : 'home',
+          clamp01(0.5 + (rng() - 0.5) * 0.2),
+          clamp01(0.5 + (rng() - 0.5) * 0.4),
+          0,
+        );
       }
     } else {
-      frames.push({
+      moveTo(
         minute,
-        ballX: clamp01(0.5 + (rng() - 0.5) * 0.3),
-        ballY: clamp01(0.5 + (rng() - 0.5) * 0.5),
+        rng() < 0.6 ? 'dribble' : 'pass',
         possession,
-        phase: 'mid',
-      });
+        clamp01(0.5 + (rng() - 0.5) * 0.3),
+        clamp01(0.5 + (rng() - 0.5) * 0.5),
+        rng() < 0.4 ? 0.05 + rng() * 0.05 : 0,
+      );
     }
 
     if (minute === 45) {
@@ -135,6 +177,6 @@ export function simulateMatch(home: Team, away: Team, seed: number): SimulatedMa
       awayScore,
       events,
     },
-    frames,
+    timeline,
   };
 }

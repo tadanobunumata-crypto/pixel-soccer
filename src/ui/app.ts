@@ -1,6 +1,6 @@
 import { TEAMS, getTeam } from '../data/teams';
 import { generateSchedule, computeStandings } from '../engine/league';
-import { simulateMatch, type MatchFrame } from '../engine/match';
+import { simulateMatch, type ActionKind } from '../engine/match';
 import { teamOverallRating } from '../engine/ratings';
 import type { Fixture, StandingRow, Team } from '../types';
 import { drawFrame, drawReplayFrame, PITCH_H, PITCH_W } from '../render/pitch';
@@ -114,6 +114,7 @@ function renderReplay() {
       lerpPair(from.ball, to.ball),
       from.home.map((p, i) => lerpPair(p, to.home[i] ?? p)),
       from.away.map((p, i) => lerpPair(p, to.away[i] ?? p)),
+      (now / 220) % 1,
     );
 
     const seconds = Math.floor(k / REPLAY_FPS);
@@ -262,11 +263,16 @@ function simulateOtherFixtures(round: number) {
 
 // ---------- Match screen ----------
 
-const MS_PER_SIMULATED_MINUTE = 400;
 let activeAnimationHandle: number | undefined;
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+
+function durationFor(kind: ActionKind): number {
+  if (kind === 'shot') return 650;
+  if (kind === 'pass') return 480;
+  return 420; // dribble
 }
 
 function startMatch(fixture: Fixture) {
@@ -274,7 +280,7 @@ function startMatch(fixture: Fixture) {
   const home = getTeam(fixture.homeId);
   const away = getTeam(fixture.awayId);
   const seed = state.round * 10000 + fixture.homeId.length * 97 + fixture.awayId.length * 13 + Date.now() % 1000;
-  const { result, frames } = simulateMatch(home, away, seed);
+  const { result, timeline } = simulateMatch(home, away, seed);
 
   // resolve the rest of the round's fixtures instantly in the background
   simulateOtherFixtures(state.round);
@@ -309,13 +315,6 @@ function startMatch(fixture: Fixture) {
   let awayScore = 0;
   let eventCursor = 0;
 
-  // A synthetic kickoff frame (ball centered, minute 0) so the first minute
-  // of play also has a start point to interpolate from.
-  const timeline: MatchFrame[] = [
-    { minute: 0, ballX: 0.5, ballY: 0.5, possession: null, phase: 'mid' },
-    ...frames,
-  ];
-
   const logLine = (text: string) => {
     const p = el('p', undefined, text);
     commentary.appendChild(p);
@@ -335,38 +334,26 @@ function startMatch(fixture: Fixture) {
     }
   };
 
-  // Renders a smooth in-between position for any point in match time by
-  // interpolating the ball between the two bracketing per-minute frames.
-  // Player positions follow automatically since they're a function of the
-  // ball position (see engine/positioning.ts).
-  const renderAt = (minuteFloat: number) => {
-    const clamped = Math.min(90, Math.max(0, minuteFloat));
-    const k = Math.min(timeline.length - 2, Math.floor(clamped));
-    const t = clamped - k;
-    const from = timeline[k];
-    const to = timeline[k + 1];
-    const minuteFloor = Math.floor(clamped);
+  // Renders one micro-event segment (a dribble run, a pass, or a shot) at
+  // progress t (0..1): the ball moves from -> to with a parabolic arc for
+  // its height, and player positions follow from the ball position (see
+  // engine/positioning.ts), so they move smoothly along with it.
+  const renderSegment = (segIndex: number, t: number, animT: number) => {
+    const seg = timeline[Math.min(segIndex, timeline.length - 1)];
+    const ballX = lerp(seg.fromX, seg.toX, t);
+    const ballY = lerp(seg.fromY, seg.toY, t);
+    const ballZ = seg.peakHeight * 4 * t * (1 - t);
+    const kicking = seg.kind !== 'dribble' && t < 0.3;
+    const goalFlash = seg.kind === 'shot' && seg.outcome === 'goal' && t > 0.55;
 
-    drawFrame(
-      ctx,
-      {
-        minute: minuteFloor,
-        ballX: lerp(from.ballX, to.ballX, t),
-        ballY: lerp(from.ballY, to.ballY, t),
-        possession: to.possession,
-        phase: to.phase,
-      },
-      home,
-      away,
-    );
-    minuteLabel.textContent = `${minuteFloor}'`;
-    processEventsUpTo(minuteFloor);
+    drawFrame(ctx, { ballX, ballY, ballZ, side: seg.side, kicking, goalFlash }, home, away, animT);
+    minuteLabel.textContent = `${seg.minute}'`;
   };
 
   const finishPlayback = () => {
     if (activeAnimationHandle) cancelAnimationFrame(activeAnimationHandle);
     activeAnimationHandle = undefined;
-    renderAt(90);
+    renderSegment(timeline.length - 1, 1, 0);
     processEventsUpTo(90);
     scoreLabel.textContent = `${result.homeScore} - ${result.awayScore}`;
     skipBtn.disabled = true;
@@ -379,15 +366,28 @@ function startMatch(fixture: Fixture) {
     controls.appendChild(doneBtn);
   };
 
-  let startTimestamp: number | undefined;
+  let segIndex = 0;
+  let segStart: number | undefined;
+
   const tick = (now: number) => {
-    if (startTimestamp === undefined) startTimestamp = now;
-    const elapsedMinutes = (now - startTimestamp) / MS_PER_SIMULATED_MINUTE;
-    if (elapsedMinutes >= 90) {
+    if (segIndex >= timeline.length) {
       finishPlayback();
       return;
     }
-    renderAt(elapsedMinutes);
+    if (segStart === undefined) segStart = now;
+    const seg = timeline[segIndex];
+    const duration = durationFor(seg.kind);
+    const t = Math.min(1, (now - segStart) / duration);
+
+    renderSegment(segIndex, t, (now / 220) % 1);
+
+    if (t >= 1) {
+      const next = timeline[segIndex + 1];
+      if (!next || next.minute !== seg.minute) processEventsUpTo(seg.minute);
+      segIndex++;
+      segStart = now;
+    }
+
     activeAnimationHandle = requestAnimationFrame(tick);
   };
 
