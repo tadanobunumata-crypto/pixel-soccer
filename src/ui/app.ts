@@ -181,7 +181,7 @@ function simulateOtherFixtures(round: number) {
 
 // ---------- Match screen ----------
 
-const MS_PER_SIMULATED_MINUTE = 130;
+const MS_PER_SIMULATED_MINUTE = 400;
 let activeAnimationHandle: number | undefined;
 
 function lerp(a: number, b: number, t: number): number {
